@@ -5,8 +5,8 @@ Trích xuất tự động và cân bằng 3000 cặp từ tiếng Anh từ Word
 - 1000 cặp Đồng nghĩa (Synonyms) - Nhãn 1
 - 1000 cặp Không liên quan (Unrelated) - Nhãn 2
 
-Tích hợp danh sách các cặp từ thông dụng cốt lõi (tall-short, hot-cold, big-small, fast-slow,...)
-và ưu tiên các synset phổ biến đầu tiên (synsets[:3]) để tránh các nghĩa bóng hiếm gặp.
+Tích hợp danh sách các cặp từ thông dụng cốt lõi và từ điển đời thường (Everyday Commonsense Lexicon),
+bao gồm cả biến thể chính tả UK/US, và ưu tiên các synset phổ biến đầu tiên để tránh các nghĩa bóng hiếm gặp.
 """
 
 import os
@@ -16,6 +16,14 @@ import time
 import pandas as pd
 import nltk
 from nltk.corpus import wordnet as wn
+
+from commonsense_lexicon import (
+    COMMONSENSE_ANTONYMS,
+    COMMONSENSE_SYNONYMS,
+    UK_US_PAIRS,
+    is_commonsense_antonym,
+    is_commonsense_synonym
+)
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -93,10 +101,10 @@ CORE_UNRELATED = [
 
     # Các cặp hoàn toàn xa nhau
     ("apple", "car"), ("doctor", "hospital"), ("table", "sky"), ("water", "guitar"),
-    ("dog", "airplane"), ("cat", "fork"), ("book", "ocean"), ("chair", "river"),
-    ("shoe", "star"), ("milk", "train"), ("tree", "spoon"), ("stone", "watch"),
-    ("flower", "keyboard"), ("bread", "camera"), ("door", "elephant"), ("paper", "sun"),
-    ("cloud", "scissors"), ("fire", "notebook"), ("window", "monkey"), ("road", "teacup")
+    ("music", "window"), ("river", "clock"), ("chair", "cloud"), ("keyboard", "tree"),
+    ("coffee", "mountain"), ("shoe", "cloud"), ("window", "cat"), ("banana", "keyboard"),
+    ("elephant", "pencil"), ("plane", "soup"), ("lamp", "forest"), ("stone", "cloud"),
+    ("bread", "bicycle"), ("bottle", "star"), ("watch", "flower"), ("camera", "river")
 ]
 
 
@@ -110,12 +118,20 @@ def ensure_nltk_resources():
 
 
 def is_valid_word(w: str) -> bool:
-    """Từ hợp lệ chỉ gồm chữ cái, độ dài từ 2 đến 20 ký tự."""
+    """
+    [KIỂM TRA HỢP LỆ]
+    Từ hợp lệ chỉ gồm chữ cái tiếng Anh (a-z), độ dài từ 2 đến 20 ký tự,
+    không chứa số, dấu cách hay ký tự đặc biệt.
+    """
     return bool(w and w.isalpha() and 2 <= len(w) <= 20)
 
 
 def extract_antonyms_wordnet(target_count=1000, initial_set=None):
-    """Trích xuất cặp từ trái nghĩa từ WordNet (ưu tiên synset phổ biến)."""
+    """
+    [TRÍCH XUẤT TỪ TRÁI NGHĨA - NHÃN 0]
+    Duyệt qua các Synset trong WordNet, tìm các cặp Lemma có quan hệ antonyms() trực tiếp.
+    Ví dụ: lemma 'tall' -> antonyms() -> lemma 'short'.
+    """
     antonyms = set(initial_set or [])
     for syn in wn.all_synsets():
         # Ưu tiên các synset chính
@@ -134,7 +150,12 @@ def extract_antonyms_wordnet(target_count=1000, initial_set=None):
 
 
 def extract_synonyms_wordnet(target_count=1000, exclude_pairs=None, initial_set=None):
-    """Trích xuất cặp từ đồng nghĩa trong cùng synset WordNet (ưu tiên synsets[:3])."""
+    """
+    [TRÍCH XUẤT TỪ ĐỒNG NGHĨA - NHÃN 1]
+    Duyệt qua các Synset trong WordNet. Mỗi Synset đại diện cho một khái niệm ngữ nghĩa cụ thể.
+    Các từ (lemmas) nằm chung trong cùng 1 Synset chính là các từ đồng nghĩa của nhau.
+    Ví dụ: synset 'big.a.01' chứa cả 'big' và 'large' -> cặp ('big', 'large').
+    """
     if exclude_pairs is None:
         exclude_pairs = set()
     synonyms = set(initial_set or [])
@@ -155,9 +176,11 @@ def extract_synonyms_wordnet(target_count=1000, exclude_pairs=None, initial_set=
 
 def extract_unrelated_wordnet(vocab_list, target_count=1000, exclude_pairs=None, initial_set=None):
     """
+    [TRÍCH XUẤT TỪ KHÔNG LIÊN QUAN - NHÃN 2]
     Trích xuất cặp từ không liên quan ngữ nghĩa từ kho từ vựng.
-    Bao gồm cả các cặp từ cùng nhóm sự vật (Coordinate terms) nhưng không đồng nghĩa,
-    giúp mô hình phân biệt rạch ròi giữa Từ Đồng Nghĩa thật sự và Từ Cùng Nhóm.
+    Bao gồm cả các cặp từ cùng nhóm sự vật (Coordinate terms như apple-banana, dog-cat),
+    nhưng tuyệt đối kiểm tra không được chung Synset và không được có quan hệ Antonyms/Similar_to.
+    Điều này giúp mô hình k-NN học được ranh giới giữa Đồng nghĩa thật và Cùng nhóm danh mục.
     """
     if exclude_pairs is None:
         exclude_pairs = set()
@@ -170,6 +193,9 @@ def extract_unrelated_wordnet(vocab_list, target_count=1000, exclude_pairs=None,
         w1, w2 = random.sample(vocab_list, 2)
         pair = tuple(sorted([w1, w2]))
         if pair in exclude_pairs or pair in unrelated:
+            continue
+        # Tuyệt đối không nằm trong commonsense lexicon
+        if is_commonsense_antonym(w1, w2) or is_commonsense_synonym(w1, w2):
             continue
 
         all_s1 = set(wn.synsets(w1))
@@ -202,16 +228,20 @@ def extract_unrelated_wordnet(vocab_list, target_count=1000, exclude_pairs=None,
 
 
 def build_or_load_dataset(filepath="data/dataset.csv", n_per_class=1000, random_seed=42):
-    """Tạo hoặc nạp dataset 3000 mẫu cân bằng có bổ sung cặp từ cốt lõi."""
+    """
+    [HÀM ĐIỀU PHỐI DỮ LIỆU CHÍNH]
+    Tạo hoặc nạp dataset 3000 mẫu cân bằng (1000 Antonyms, 1000 Synonyms, 1000 Unrelated).
+    Nếu file CSV đã có sẵn trên đĩa thì đọc lên ngay để tiết kiệm thời gian khởi động.
+    """
     ensure_nltk_resources()
 
     print(f"[Dataset] Đang xây dựng dataset cải tiến ({n_per_class} cặp/nhãn)...")
     random.seed(random_seed)
     t0 = time.time()
 
-    # Khởi tạo tập cốt lõi
-    core_ant_set = {tuple(sorted([w1.lower(), w2.lower()])) for w1, w2 in CORE_ANTONYMS}
-    core_syn_set = {tuple(sorted([w1.lower(), w2.lower()])) for w1, w2 in CORE_SYNONYMS}
+    # Khởi tạo tập cốt lõi kết hợp từ điển đời thường & chính tả UK/US
+    core_ant_set = {tuple(sorted([w1.lower(), w2.lower()])) for w1, w2 in CORE_ANTONYMS} | set(COMMONSENSE_ANTONYMS)
+    core_syn_set = {tuple(sorted([w1.lower(), w2.lower()])) for w1, w2 in CORE_SYNONYMS} | set(COMMONSENSE_SYNONYMS) | set(UK_US_PAIRS)
     core_unrel_set = {tuple(sorted([w1.lower(), w2.lower()])) for w1, w2 in CORE_UNRELATED}
 
     # 1. Trích xuất Antonyms

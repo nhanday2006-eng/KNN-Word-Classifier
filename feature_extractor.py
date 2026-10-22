@@ -1,20 +1,13 @@
 """
 feature_extractor.py
 Trích xuất vector đặc trưng 12 chiều (12-dimensional feature vector) cô đọng, chất lượng cao
-cho thuật toán k-Nearest Neighbors (k-NN), loại bỏ hoàn toàn hiện tượng Curse of Dimensionality:
+cho thuật toán k-Nearest Neighbors (k-NN), loại bỏ hoàn toàn hiện tượng Curse of Dimensionality.
 
-1.  lemma_overlap: Tỷ lệ synset dùng chung giữa 2 từ trong WordNet.
-2.  similar_to_score: Mức độ liên kết qua quan hệ similar_tos() và also_sees() của tính từ.
-3.  antonym_graph_score: Điểm đối lập ngữ nghĩa trên đồ thị (direct + indirect cluster antonyms).
-4.  shared_attribute_or_hypernym: Jaccard similarity của hypernyms (danh/động từ) + attributes (tính từ).
-5.  max_path_sim: Max path_similarity (có chuẩn hóa tương đương cho tính từ chia sẻ attribute/cluster).
-6.  max_wup_sim: Max wup_similarity (có chuẩn hóa tương đương cho tính từ).
-7.  same_lexname: Tỷ lệ các synset có cùng lĩnh vực từ điển (synset.lexname()).
-8.  same_pos: Tỷ lệ có cùng từ loại (Part-of-Speech).
-9.  gloss_cosine_sim: Độ tương đồng Cosine TF-IDF giữa văn bản định nghĩa + ví dụ của 2 từ.
-10. svd_cosine_sim: Độ tương đồng Cosine giữa 2 vector SVD 50 chiều.
-11. svd_euclidean_dist: Khoảng cách Euclidean giữa 2 vector SVD 50 chiều.
-12. morph_opposition_flag: Cờ phát hiện tiền tố/hậu tố đối lập hình thái (un-, in-, dis-, -less vs -ful).
+Tích hợp:
+1. Chuẩn hóa so sánh hơn / so sánh nhất (better -> good, worse -> bad).
+2. Chuẩn hóa chính tả Anh - Anh (UK) vs Anh - Mỹ (US) (color - colour -> 100% Synonym).
+3. Mở rộng họ từ phái sinh (derivationally_related_forms) & đồ thị bắc cầu 2 bước (2-Hop Antonyms/Synonyms).
+4. Tích hợp Từ điển Cặp từ Đời thường (Everyday Commonsense Lexicon).
 """
 
 import sys
@@ -24,6 +17,15 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 import nltk
 from nltk.corpus import wordnet as wn
+
+from commonsense_lexicon import (
+    normalize_base_word,
+    normalize_spelling,
+    is_spelling_variant,
+    is_commonsense_antonym,
+    is_commonsense_synonym,
+    get_commonsense_associations
+)
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -37,22 +39,28 @@ NEGATION_PREFIXES = (
 
 
 def check_morphological_opposition(w1: str, w2: str) -> float:
-    """Kiểm tra tiền tố hoặc hậu tố đối lập hình thái học."""
-    w1 = w1.lower().strip()
-    w2 = w2.lower().strip()
+    """
+    [ĐẶC TRƯNG HÌNH THÁI HỌC - MORPHOLOGY]
+    Kiểm tra xem hai từ có quan hệ đối lập qua tiền tố phủ định (un-, in-, im-, dis-,...)
+    hoặc hậu tố (-ful vs -less) hay không.
+    Trả về 1.0 nếu phát hiện quan hệ đối lập hình thái (ví dụ legal - illegal, visible - invisible),
+    ngược lại trả về 0.0.
+    """
+    w1 = normalize_base_word(w1.lower().strip())
+    w2 = normalize_base_word(w2.lower().strip())
     if len(w1) >= len(w2):
         w_long, w_short = w1, w2
     else:
         w_long, w_short = w2, w1
 
-    # 1. Tiền tố đối lập
+    # 1. Kiểm tra tiền tố đối lập (Ví dụ: illegal = il + legal)
     for p in NEGATION_PREFIXES:
         if w_long.startswith(p):
             rem = w_long[len(p):]
             if rem == w_short or (len(rem) >= 3 and SequenceMatcher(None, rem, w_short).ratio() >= 0.85):
                 return 1.0
 
-    # 2. Hậu tố -ful vs -less
+    # 2. Kiểm tra cặp hậu tố đối lập -ful vs -less (Ví dụ: useful vs useless)
     if (w1.endswith("ful") and w2.endswith("less")) or (w1.endswith("less") and w2.endswith("ful")):
         b1 = w1[:-3] if w1.endswith("ful") else w1[:-4]
         b2 = w2[:-3] if w2.endswith("ful") else w2[:-4]
@@ -77,7 +85,11 @@ class WordPairFeatureExtractor:
 
     def _get_gloss_text(self, word: str) -> str:
         """Lấy văn bản định nghĩa và ví dụ từ các synset phổ biến của từ."""
-        syns = wn.synsets(word.lower().strip())[:4]
+        w = normalize_spelling(normalize_base_word(word.lower().strip()))
+        syns = wn.synsets(w)[:4]
+        if not syns and w != word:
+            syns = wn.synsets(word.lower().strip())[:4]
+
         if syns:
             parts = []
             for s in syns:
@@ -120,7 +132,7 @@ class WordPairFeatureExtractor:
 
     def get_word_vector(self, word: str) -> np.ndarray:
         """Lấy vector ngữ nghĩa 50 chiều đã chuẩn hóa L2 của một từ."""
-        w = word.lower().strip()
+        w = normalize_spelling(normalize_base_word(word.lower().strip()))
         if w in self.vector_cache:
             return self.vector_cache[w]
 
@@ -140,32 +152,103 @@ class WordPairFeatureExtractor:
         return sv
 
     def get_word_info(self, word: str) -> dict:
-        """Trích xuất và lưu cache thông tin đồ thị WordNet của từ."""
-        w = word.lower().strip()
-        if w in self.info_cache:
-            return self.info_cache[w]
+        """
+        Trích xuất và lưu cache thông tin đồ thị WordNet của từ,
+        bao gồm mở rộng họ từ phái sinh (derivationally_related_forms)
+        và quan hệ bắc cầu 2 bước (2-Hop Antonyms/Synonyms).
+        """
+        orig_w = word.lower().strip()
+        norm_w = normalize_base_word(orig_w)
+        std_w = normalize_spelling(norm_w)
 
-        syns = wn.synsets(w)
-        # Ưu tiên các synset phổ biến đầu tiên
-        primary_syns = syns[:4]
+        cache_key = f"{orig_w}:{std_w}"
+        if cache_key in self.info_cache:
+            return self.info_cache[cache_key]
+
+        # Gom synsets từ từ gốc, từ chuẩn hóa và biến thể
+        syns_dict = {}
+        for query_word in [orig_w, norm_w, std_w]:
+            for s in wn.synsets(query_word):
+                syns_dict[s.name()] = s
+
+        # Thêm biến thể hình thái morphy (verb, noun, adj)
+        for pos in (wn.VERB, wn.NOUN, wn.ADJ):
+            try:
+                m = wn.morphy(orig_w, pos)
+                if m and m not in (orig_w, norm_w, std_w):
+                    for s in wn.synsets(m):
+                        syns_dict[s.name()] = s
+            except Exception:
+                pass
+
+        # Xử lý cắt hậu tố phổ biến: -ing, -ed, -ly, -ness (ví dụ: boring -> bore)
+        for suffix in ("ing", "ed", "ly", "ness"):
+            if orig_w.endswith(suffix) and len(orig_w) > len(suffix) + 2:
+                stem = orig_w[:-len(suffix)]
+                for pos in (wn.VERB, wn.NOUN, wn.ADJ):
+                    try:
+                        m = wn.morphy(stem, pos)
+                        if m:
+                            for s in wn.synsets(m):
+                                syns_dict[s.name()] = s
+                    except Exception:
+                        pass
+                if stem.endswith("e") or orig_w.endswith("ing"):
+                    stem_e = stem if stem.endswith("e") else stem + "e"
+                    for s in wn.synsets(stem_e):
+                        syns_dict[s.name()] = s
+
+        all_syns = list(syns_dict.values())
+        primary_syns = all_syns[:5] if all_syns else []
 
         # 1. Lemmas
-        lemmas = set(l.name().lower().replace("_", " ") for s in syns for l in s.lemmas())
+        lemmas = set(l.name().lower().replace("_", " ") for s in all_syns for l in s.lemmas())
+        lemmas.add(orig_w)
+        lemmas.add(norm_w)
+        lemmas.add(std_w)
 
         # 2. Similar_tos & Also_sees
-        similar_syns = set(st for s in syns for st in s.similar_tos()) | set(asyn for s in syns for asyn in s.also_sees())
+        similar_syns = set(st for s in all_syns for st in s.similar_tos()) | set(asyn for s in all_syns for asyn in s.also_sees())
         similar_lemmas = set(l.name().lower().replace("_", " ") for s in similar_syns for l in s.lemmas())
 
         # 3. Direct antonyms
-        antonyms = set()
-        for s in syns:
+        direct_antonyms = set()
+        for s in all_syns:
             for l in s.lemmas():
                 for a in l.antonyms():
-                    antonyms.add(a.name().lower().replace("_", " "))
+                    direct_antonyms.add(a.name().lower().replace("_", " "))
 
-        # 4. Concepts (Hypernyms 2-hop + Attributes trên toàn bộ synsets)
+        # 4. Derivationally Related Forms (Họ từ phái sinh) & Derivational Antonyms
+        derivational_lemmas = set()
+        derivational_antonyms = set()
+        for s in all_syns:
+            for l in s.lemmas():
+                for drf in l.derivationally_related_forms():
+                    drf_name = drf.name().lower().replace("_", " ")
+                    derivational_lemmas.add(drf_name)
+                    for a in drf.antonyms():
+                        derivational_antonyms.add(a.name().lower().replace("_", " "))
+                    # Cũng gom synset của drf
+                    drf_syn = drf.synset()
+                    for sim in drf_syn.similar_tos():
+                        for sl in sim.lemmas():
+                            derivational_lemmas.add(sl.name().lower().replace("_", " "))
+
+        # 5. Cluster Antonyms (2-Hop: Antonyms của similar_tos và also_sees)
+        cluster_antonyms = set()
+        for s in similar_syns:
+            for l in s.lemmas():
+                for a in l.antonyms():
+                    cluster_antonyms.add(a.name().lower().replace("_", " "))
+
+        # 6. Commonsense associations (Từ điển đời thường)
+        cs = get_commonsense_associations(orig_w)
+        cs_syns = cs["synonyms"]
+        cs_ants = cs["antonyms"]
+
+        # 7. Concepts (Hypernyms 2-hop + Attributes trên toàn bộ synsets)
         concepts = set()
-        for s in syns:
+        for s in all_syns:
             for a in s.attributes():
                 concepts.add(a.name())
             for h in s.hypernyms():
@@ -173,34 +256,70 @@ class WordPairFeatureExtractor:
                 for hh in h.hypernyms():
                     concepts.add(hh.name())
 
-        # 5. Lexnames & POS
+        # 8. Lexnames & POS
         lexnames = set(s.lexname() for s in primary_syns)
         poses = set('a' if s.pos() in ('a', 's') else s.pos() for s in primary_syns)
 
         info = {
-            "synset_names": [s.name() for s in syns],
+            "synset_names": [s.name() for s in all_syns],
             "primary_synset_names": [s.name() for s in primary_syns],
             "lemmas": lemmas,
             "similar_synset_names": [s.name() for s in similar_syns],
             "similar_lemmas": similar_lemmas,
-            "antonyms": antonyms,
+            "antonyms": direct_antonyms,
+            "derivational_lemmas": derivational_lemmas,
+            "derivational_antonyms": derivational_antonyms,
+            "cluster_antonyms": cluster_antonyms,
+            "cs_synonyms": cs_syns,
+            "cs_antonyms": cs_ants,
             "concepts": concepts,
             "lexnames": lexnames,
             "poses": poses
         }
-        self.info_cache[w] = info
+        self.info_cache[cache_key] = info
         return info
 
     def extract_pair_features(self, w1: str, w2: str) -> np.ndarray:
         """
         Trích xuất đúng 12 đặc trưng số cốt lõi cho một cặp từ (w1, w2).
-        Đảm bảo không bị Curse of Dimensionality và xử lý hoàn hảo tính từ.
+        Đảm bảo không bị Curse of Dimensionality và xử lý hoàn hảo tính từ,
+        so sánh hơn, chính tả UK/US, và cặp từ đời thường.
         """
-        w1 = w1.lower().strip()
-        w2 = w2.lower().strip()
+        w1_orig = w1.lower().strip()
+        w2_orig = w2.lower().strip()
 
-        info1 = self.get_word_info(w1)
-        info2 = self.get_word_info(w2)
+        # =====================================================================
+        # KIỂM TRA CHÍNH TẢ ANH - ANH (UK) vs ANH - MỸ (US)
+        # =====================================================================
+        if is_spelling_variant(w1_orig, w2_orig):
+            # Cặp từ chính tả là Đồng nghĩa 100%
+            return np.array([
+                1.0,  # 1. lemma_overlap
+                1.0,  # 2. similar_to_score
+                0.0,  # 3. antonym_graph_score
+                1.0,  # 4. shared_attr_hyp
+                1.0,  # 5. max_path
+                1.0,  # 6. max_wup
+                1.0,  # 7. same_lexname
+                1.0,  # 8. same_pos
+                1.0,  # 9. gloss_cosine_sim
+                1.0,  # 10. svd_cosine_sim
+                0.0,  # 11. svd_euclidean_dist
+                0.0   # 12. morph_opposition_flag
+            ], dtype=np.float32)
+
+        # =====================================================================
+        # CHUẨN HÓA TỪ GỐC (SO SÁNH HƠN / SO SÁNH NHẤT)
+        # =====================================================================
+        w1_norm = normalize_base_word(w1_orig)
+        w2_norm = normalize_base_word(w2_orig)
+
+        # Kiểm tra kho từ điển đời thường
+        is_cs_ant = is_commonsense_antonym(w1_orig, w2_orig) or is_commonsense_antonym(w1_norm, w2_norm)
+        is_cs_syn = is_commonsense_synonym(w1_orig, w2_orig) or is_commonsense_synonym(w1_norm, w2_norm)
+
+        info1 = self.get_word_info(w1_orig)
+        info2 = self.get_word_info(w2_orig)
 
         s1_set = set(info1["synset_names"])
         s2_set = set(info2["synset_names"])
@@ -208,24 +327,43 @@ class WordPairFeatureExtractor:
         # 1. lemma_overlap: Tỷ lệ chia sẻ synset
         u_syns = s1_set | s2_set
         lemma_overlap = float(len(s1_set & s2_set) / len(u_syns)) if u_syns else 0.0
+        if w1_norm == w2_norm:
+            lemma_overlap = 1.0
 
-        # 2. similar_to_score: Mức độ liên kết qua similar_tos và also_sees
-        if w2 in info1["similar_lemmas"] or w1 in info2["similar_lemmas"]:
+        # 2. similar_to_score: Mức độ liên kết qua similar_tos, also_sees và họ từ phái sinh
+        if w2_orig in info1["similar_lemmas"] or w1_orig in info2["similar_lemmas"]:
             similar_to_score = 1.0
+        elif w2_norm in info1["similar_lemmas"] or w1_norm in info2["similar_lemmas"]:
+            similar_to_score = 1.0
+        elif w2_orig in info1["cs_synonyms"] or w1_orig in info2["cs_synonyms"]:
+            similar_to_score = 1.0
+        elif info1["derivational_lemmas"] & info2["lemmas"] or info2["derivational_lemmas"] & info1["lemmas"]:
+            similar_to_score = 0.85
         else:
             sim_u = set(info1["similar_synset_names"]) | set(info2["similar_synset_names"])
             sim_i = set(info1["similar_synset_names"]) & set(info2["similar_synset_names"])
             similar_to_score = float(len(sim_i) / len(sim_u)) if sim_u else 0.0
 
-        # 3. antonym_graph_score: Quan hệ đối lập trên đồ thị (Direct + Cluster)
+        # 3. antonym_graph_score: Quan hệ đối lập trên đồ thị (Direct + Derivational + Cluster 2-Hop)
         antonym_graph_score = 0.0
-        # Direct lemma antonym
-        if w2 in info1["antonyms"] or w1 in info2["antonyms"]:
+        if is_cs_ant:
+            antonym_graph_score = 1.0
+        elif w2_orig in info1["antonyms"] or w1_orig in info2["antonyms"]:
+            antonym_graph_score = 1.0
+        elif w2_norm in info1["antonyms"] or w1_norm in info2["antonyms"]:
+            antonym_graph_score = 1.0
+        elif w2_orig in info1["cs_antonyms"] or w1_orig in info2["cs_antonyms"]:
             antonym_graph_score = 1.0
         elif (info1["antonyms"] & info2["lemmas"]) or (info2["antonyms"] & info1["lemmas"]):
             antonym_graph_score = 0.95
         elif (info1["antonyms"] & info2["similar_lemmas"]) or (info2["antonyms"] & info1["similar_lemmas"]):
+            antonym_graph_score = 0.90
+        elif (info1["cluster_antonyms"] & info2["lemmas"]) or (info2["cluster_antonyms"] & info1["lemmas"]):
+            antonym_graph_score = 0.90
+        elif (info1["derivational_antonyms"] & info2["lemmas"]) or (info2["derivational_antonyms"] & info1["lemmas"]):
             antonym_graph_score = 0.85
+        elif (info1["derivational_antonyms"] & info2["similar_lemmas"]) or (info2["derivational_antonyms"] & info1["similar_lemmas"]):
+            antonym_graph_score = 0.80
 
         # 4. shared_attribute_or_hypernym: Jaccard similarity hypernyms & attributes
         c_u = info1["concepts"] | info2["concepts"]
@@ -275,8 +413,8 @@ class WordPairFeatureExtractor:
 
         # 9. gloss_cosine_sim: Độ tương đồng văn bản định nghĩa TF-IDF
         if self.tfidf is not None:
-            g1 = self._get_gloss_text(w1)
-            g2 = self._get_gloss_text(w2)
+            g1 = self._get_gloss_text(w1_orig)
+            g2 = self._get_gloss_text(w2_orig)
             tf1 = self.tfidf.transform([g1])
             tf2 = self.tfidf.transform([g2])
             n1 = np.linalg.norm(tf1.data)
@@ -289,13 +427,39 @@ class WordPairFeatureExtractor:
             gloss_cosine_sim = 0.0
 
         # 10. svd_cosine_sim & 11. svd_euclidean_dist:
-        v1 = self.get_word_vector(w1)
-        v2 = self.get_word_vector(w2)
+        v1 = self.get_word_vector(w1_orig)
+        v2 = self.get_word_vector(w2_orig)
         svd_cosine_sim = float(np.dot(v1, v2))
         svd_euclidean_dist = float(np.linalg.norm(v1 - v2))
 
         # 12. morph_opposition_flag: Cờ đối lập hình thái
-        morph_opposition_flag = check_morphological_opposition(w1, w2)
+        morph_opposition_flag = check_morphological_opposition(w1_orig, w2_orig)
+
+        # =====================================================================
+        # HIỆU CHỈNH TRỌNG SỐ CHO COMMONSENSE LEXICON
+        # =====================================================================
+        if is_cs_ant:
+            antonym_graph_score = 1.0
+            similar_to_score = 0.0
+            lemma_overlap = 0.0
+            shared_attr_hyp = max(shared_attr_hyp, 0.35)
+            max_path = max(max_path, 0.33)
+            max_wup = max(max_wup, 0.50)
+            same_pos = max(same_pos, 0.50)
+            svd_cosine_sim = max(svd_cosine_sim, 0.50)
+            svd_euclidean_dist = min(svd_euclidean_dist, 1.0)
+        elif is_cs_syn:
+            antonym_graph_score = 0.0
+            morph_opposition_flag = 0.0
+            similar_to_score = 1.0
+            lemma_overlap = max(lemma_overlap, 0.50)
+            shared_attr_hyp = max(shared_attr_hyp, 0.40)
+            max_path = max(max_path, 0.50)
+            max_wup = max(max_wup, 0.70)
+            same_pos = max(same_pos, 0.50)
+            gloss_cosine_sim = max(gloss_cosine_sim, 0.30)
+            svd_cosine_sim = max(svd_cosine_sim, 0.70)
+            svd_euclidean_dist = min(svd_euclidean_dist, 0.60)
 
         # Vector 12 chiều chính xác
         features = np.array([
@@ -324,14 +488,13 @@ class WordPairFeatureExtractor:
         return np.array(feature_list, dtype=np.float32)
 
     def get_feature_names(self) -> list:
-        """Trả về danh sách 12 tên đặc trưng mô tả."""
         return [
             "lemma_overlap",
             "similar_to_score",
             "antonym_graph_score",
-            "shared_attribute_or_hypernym",
-            "max_path_sim",
-            "max_wup_sim",
+            "shared_attr_hyp",
+            "max_path",
+            "max_wup",
             "same_lexname",
             "same_pos",
             "gloss_cosine_sim",
@@ -339,26 +502,3 @@ class WordPairFeatureExtractor:
             "svd_euclidean_dist",
             "morph_opposition_flag"
         ]
-
-
-if __name__ == "__main__":
-    extractor = WordPairFeatureExtractor(n_components=50)
-    words = ["tall", "short", "high", "tallish", "apple", "hot", "cold", "happy", "sad"]
-    extractor.fit(words)
-
-    test_pairs = [
-        ("tall", "short"),
-        ("tall", "high"),
-        ("tall", "tallish"),
-        ("tall", "apple"),
-        ("hot", "cold"),
-        ("happy", "sad")
-    ]
-    feats = extractor.transform(test_pairs)
-    print(f"Kích thước ma trận đặc trưng: {feats.shape}")
-    print(f"Số lượng đặc trưng: {len(extractor.get_feature_names())}")
-    names = extractor.get_feature_names()
-    for (w1, w2), row in zip(test_pairs, feats):
-        print(f"\n({w1}, {w2}):")
-        for n, val in zip(names, row):
-            print(f"  {n:28}: {val:.4f}")

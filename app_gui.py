@@ -14,6 +14,8 @@ Bao gồm 3 tab chức năng:
 import os
 import sys
 import subprocess
+import threading
+from tkinter import messagebox
 import joblib
 import numpy as np
 from PIL import Image
@@ -194,6 +196,22 @@ class KNNWordPairApp(ctk.CTk):
             justify="left"
         )
         self.lbl_sidebar_k.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Nút Cập nhật bản mới từ GitHub
+        self.btn_update = ctk.CTkButton(
+            self.sidebar_frame,
+            text="🔄  Cập nhật bản mới (GitHub)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_CARD,
+            hover_color="#21262d",
+            text_color="#58a6ff",
+            border_width=1,
+            border_color="#30363d",
+            height=32,
+            corner_radius=6,
+            command=self.trigger_github_update
+        )
+        self.btn_update.grid(row=8, column=0, padx=14, pady=(0, 16), sticky="ew")
 
     def select_tab(self, tab_id):
         """Chuyển đổi giao diện giữa 3 tab chức năng."""
@@ -950,6 +968,49 @@ class KNNWordPairApp(ctk.CTk):
             os.startfile(plots_dir)
         else:
             subprocess.Popen(["xdg-open", plots_dir])
+
+    # =========================================================================
+    # TỰ ĐỘNG CẬP NHẬT TỪ GITHUB
+    # =========================================================================
+    def trigger_github_update(self):
+        """Kích hoạt tiến trình cập nhật từ GitHub trong luồng ngầm."""
+        self.btn_update.configure(state="disabled", text="⏳ Đang kiểm tra...")
+        threading.Thread(target=self._run_update_worker, daemon=True).start()
+
+    def _run_update_worker(self):
+        try:
+            from updater import update_from_github
+            res = update_from_github()
+        except Exception as e:
+            res = {"status": "error", "message": str(e)}
+        self.after(0, lambda: self._on_update_completed(res))
+
+    def _on_update_completed(self, res):
+        self.btn_update.configure(state="normal", text="🔄  Cập nhật bản mới (GitHub)")
+        status = res.get("status")
+        if status == "success":
+            messagebox.showinfo(
+                "Cập nhật thành công",
+                f"{res.get('message', 'Đã cập nhật mã nguồn thành công!')}\n\n"
+                "Vui lòng khởi động lại ứng dụng để áp dụng các thay đổi mới nhất!"
+            )
+        elif status == "up_to_date":
+            messagebox.showinfo(
+                "Thông báo phiên bản",
+                res.get("message", "Ứng dụng của bạn đã ở phiên bản mới nhất!")
+            )
+        elif status == "local_changes":
+            messagebox.showwarning(
+                "Phát hiện thay đổi Local (Chốt an toàn)",
+                f"{res.get('message')}\n\n"
+                "Chốt an toàn đã ngăn ghi đè để bảo vệ mã nguồn đang phát triển của bạn!"
+            )
+        else:
+            messagebox.showwarning(
+                "Thông báo cập nhật",
+                f"Không thể cập nhật tự động từ GitHub:\n{res.get('message', 'Lỗi không xác định')}\n\n"
+                "Gợi ý: Kiểm tra kết nối mạng hoặc cập nhật URL trong file repo_config.txt."
+            )
 
 
 if __name__ == "__main__":

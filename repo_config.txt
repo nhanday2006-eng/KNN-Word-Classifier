@@ -1,0 +1,3 @@
+# CẤU HÌNH ĐỊA CHỈ GITHUB REPOSITORY ĐỂ TỰ ĐỘNG CẬP NHẬT TOOL
+# Bạn có thể thay đổi đường dẫn URL bên dưới thành repository GitHub của bạn:
+https://github.com/nhanday2006-eng/KNN-Word-Classifier
